@@ -1,0 +1,274 @@
+esphome:
+  name: atom-relay
+  friendly_name: Atom Relay Controller
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+
+wifi:
+  ssid: "Hoexperli"
+  password: "13776350"
+
+captive_portal:
+
+logger:
+
+api:
+
+ota:
+  platform: esphome
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      then:
+        - lambda: |-
+            id(last_valid_time_source) = "homeassistant";
+            ESP_LOGI("time", "Time synced from Home Assistant");
+
+  - platform: sntp
+    id: sntp_time
+    timezone: "Europe/Zurich"
+    on_time_sync:
+      then:
+        - lambda: |-
+            if (id(last_valid_time_source) != "homeassistant") {
+              id(last_valid_time_source) = "sntp";
+              ESP_LOGI("time", "Time synced from SNTP");
+            }
+
+globals:
+  - id: manual_off_time
+    type: uint32_t
+    restore_value: yes
+    initial_value: '0'
+
+  - id: last_valid_time_source
+    type: std::string
+    restore_value: yes
+    initial_value: '"unknown"'
+
+switch:
+  - platform: gpio
+    pin: GPIO02
+    id: power_relay
+    name: "Power Relay"
+    restore_mode: ALWAYS_OFF
+
+  - platform: template
+    name: "Manual Relay Control"
+    id: manual_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - switch.turn_on: power_relay
+      - lambda: 'id(manual_off_time) = 0;'
+      - logger.log: "Manual override: relay turned ON"
+    turn_off_action:
+      - lambda: |-
+          esphome::ESPTime now;
+          if (id(last_valid_time_source) == "homeassistant") {
+            now = id(ha_time).now();
+          } else {
+            now = id(sntp_time).now();
+          }
+          id(manual_off_time) = now.timestamp;
+      - switch.turn_off: power_relay
+      - logger.log: "Manual override: relay turned OFF"
+
+binary_sensor:
+  - platform: template
+    name: "Relay Status"
+    lambda: |-
+      return id(power_relay).state;
+    device_class: power
+
+number:
+  - platform: template
+    name: "Winter Start Hour"
+    id: winter_start_hour
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 8
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Winter End Hour"
+    id: winter_end_hour
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 9
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Summer Start Month"
+    id: summer_start_month
+    min_value: 1
+    max_value: 12
+    step: 1
+    initial_value: 7
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Summer Start Day"
+    id: summer_start_day
+    min_value: 1
+    max_value: 31
+    step: 1
+    initial_value: 1
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Winter Start Month"
+    id: winter_start_month
+    min_value: 1
+    max_value: 12
+    step: 1
+    initial_value: 11
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Winter Start Day"
+    id: winter_start_day
+    min_value: 1
+    max_value: 31
+    step: 1
+    initial_value: 1
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Summer Manual Override Duration (s)"
+    id: summer_override_duration
+    min_value: 60
+    max_value: 86400
+    step: 60
+    initial_value: 43200  # 12 hours
+    restore_value: true
+    optimistic: true
+
+select:
+  - platform: template
+    name: "Winter Active Days"
+    id: winter_days_select
+    optimistic: true
+    options:
+      - "Mon,Wed,Fri"
+      - "Mon-Fri"
+      - "Mon,Wed,Fri,Sat"
+      - "Fri,Sat,Sun"
+      - "Everyday"
+    initial_option: "Mon,Wed,Fri"
+    restore_value: true
+
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          esphome::ESPTime now;
+          if (id(last_valid_time_source) == "homeassistant") {
+            now = id(ha_time).now();
+          } else {
+            now = id(sntp_time).now();
+          }
+
+          if (!now.is_valid()) {
+            ESP_LOGW("time", "No valid time yet — skipping schedule check");
+            return;
+          }
+
+          auto day_of_year = [](int m, int d) -> int {
+            static const int days_in_month[] = { 0,31,59,90,120,151,181,212,243,273,304,334 };
+            return days_in_month[m - 1] + d;
+          };
+
+          int today = day_of_year(now.month, now.day_of_month);
+          int summer_start = day_of_year(int(id(summer_start_month).state), int(id(summer_start_day).state));
+          int winter_start = day_of_year(int(id(winter_start_month).state), int(id(winter_start_day).state));
+
+          bool is_summer = false;
+          if (summer_start < winter_start) {
+            is_summer = today >= summer_start && today < winter_start;
+          } else {
+            is_summer = today >= summer_start || today < winter_start;
+          }
+
+          int dow = now.day_of_week; // 1=Mon ... 7=Sun
+          int hour = now.hour;
+
+          bool manual_off = (id(manual_off_time) > 0);
+          bool scheduled_on = false;
+
+          if (is_summer) {
+            scheduled_on = true;
+          } else {
+            int start_hr = int(id(winter_start_hour).state);
+            int end_hr = int(id(winter_end_hour).state);
+            bool in_time = (hour >= start_hr && hour < end_hr);
+
+            std::string days = id(winter_days_select).state;
+            bool valid_day = false;
+            if (days == "Everyday") {
+              valid_day = true;
+            } else if (
+                (days.find("Mon") != std::string::npos && dow == 1) ||
+                (days.find("Tue") != std::string::npos && dow == 2) ||
+                (days.find("Wed") != std::string::npos && dow == 3) ||
+                (days.find("Thu") != std::string::npos && dow == 4) ||
+                (days.find("Fri") != std::string::npos && dow == 5) ||
+                (days.find("Sat") != std::string::npos && dow == 6) ||
+                (days.find("Sun") != std::string::npos && dow == 7)) {
+              valid_day = true;
+            }
+
+            scheduled_on = valid_day && in_time;
+          }
+
+          // Logging
+          ESP_LOGD("schedule", "Now=%02d:%02d, Summer=%s, Scheduled ON=%s, Manual OFF=%s",
+                   now.hour, now.minute,
+                   is_summer ? "true" : "false",
+                   scheduled_on ? "true" : "false",
+                   manual_off ? "true" : "false");
+
+          // Manual override expiration logic
+          if (manual_off) {
+            uint32_t now_ts = now.timestamp;
+            uint32_t off_ts = id(manual_off_time);
+
+            if (is_summer && now_ts - off_ts >= int(id(summer_override_duration).state)) {
+              id(manual_off_time) = 0;
+              id(manual_switch).turn_on();
+              ESP_LOGI("manual", "Summer override expired — turning back ON (Summer).");
+            } else if (!is_summer && scheduled_on) {
+              // Only resume if we are at the exact start of the scheduled interval
+              if (hour == int(id(winter_start_hour).state)) {
+                id(manual_off_time) = 0;
+                id(manual_switch).turn_on();
+                ESP_LOGI("manual", "Start of schedule reached — turning back ON (Winter).");
+              } else {
+                ESP_LOGI("manual", "Manual OFF respected — within scheduled time but not at start.");
+              }
+            }
+
+            return;
+          }
+
+          // Apply schedule if not overridden
+          if (scheduled_on && !id(power_relay).state) {
+            id(power_relay).turn_on();
+            ESP_LOGI("schedule", "Scheduled ON — turning ON relay.");
+          } else if (!scheduled_on && id(power_relay).state) {
+            id(power_relay).turn_off();
+            ESP_LOGI("schedule", "Outside schedule — turning OFF relay.");
+          }
