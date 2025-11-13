@@ -1,0 +1,384 @@
+esphome:
+  name: esphome-web-0ed4d4
+  friendly_name: Relay Controller 2
+  min_version: 2025.9.0
+  name_add_mac_suffix: false
+
+  on_boot:
+    priority: -100
+    then:
+      - switch.turn_on: power_relay
+      - delay: 15min
+      - logger.log: "Initial boot delay over, enabling schedule..."
+      - lambda: |-
+          id(schedule_enabled) = true;
+          ESP_LOGI("boot", "✅ Schedule explicitly enabled after boot delay.");
+
+
+esp32:
+  variant: esp32s3
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "Hoexperli"
+  password: "s4S7Ptn6"
+
+  # IMPORTANT: do NOT reboot just because WiFi is unavailable
+  reboot_timeout: 0s
+
+  on_connect:
+    then:
+      - logger.log: "✅ WiFi connected!"
+  on_disconnect:
+    then:
+      - logger.log: "⚠️ WiFi disconnected!"
+
+# ESPHome internal network stack
+network:
+  enable_ipv6: false
+
+captive_portal:
+
+logger:
+
+api:
+  # IMPORTANT: do NOT reboot just because Home Assistant API is offline
+  reboot_timeout: 0s
+
+ota:
+  platform: esphome
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      then:
+        - logger.log: "⏰ Time synced from Home Assistant"
+        - lambda: 'id(last_valid_time_source) = "homeassistant";'
+
+  - platform: sntp
+    id: sntp_time
+    timezone: "Europe/Zurich"
+    on_time_sync:
+      then:
+        - logger.log: "⏰ Time synced from SNTP"
+        - lambda: |-
+            if (id(last_valid_time_source) != "homeassistant") {
+              id(last_valid_time_source) = "sntp";
+            }
+
+globals:
+  - id: manual_off_time
+    type: uint32_t
+    restore_value: yes
+    initial_value: '0'
+
+  - id: last_valid_time_source
+    type: std::string
+    restore_value: yes
+    initial_value: '"unknown"'
+
+  - id: is_summer_state
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+
+  # Counter for skipped schedule checks
+  - id: schedule_skip_count
+    type: uint32_t
+    restore_value: yes
+    initial_value: '0'
+
+  # Flag: only allow schedule after first valid time sync
+  - id: time_ready
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # NEW: scheduler allowed to touch relay only when this is true
+  - id: schedule_enabled
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+switch:
+  - platform: gpio
+    pin: GPIO02
+    id: power_relay
+    name: "Power Relay"
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: "Schedule controlled Relay Control"
+    id: manual_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - switch.turn_on: power_relay
+      - lambda: 'id(manual_off_time) = 0;'
+      - logger.log: "Manual override: relay turned ON"
+    turn_off_action:
+      - lambda: |-
+          esphome::ESPTime now;
+          if (id(last_valid_time_source) == "homeassistant") {
+            now = id(ha_time).now();
+          } else {
+            now = id(sntp_time).now();
+          }
+          id(manual_off_time) = now.timestamp;
+      - switch.turn_off: power_relay
+      - logger.log: "Manual override: relay turned OFF"
+
+binary_sensor:
+  - platform: template
+    name: "Relay Status"
+    lambda: |-
+      return id(power_relay).state;
+    device_class: power
+
+  - platform: template
+    name: "Is Summer"
+    id: is_summer_sensor
+    lambda: |-
+      return id(is_summer_state);
+
+  - platform: status
+    name: "ESP Status (Online)"
+
+sensor:
+  # WiFi connectivity as numeric 1/0 (diagnostic only)
+  - platform: template
+    name: "WiFi Connected"
+    id: wifi_connected_sensor
+    lambda: |-
+      return esphome::network::is_connected() ? 1 : 0;
+    update_interval: 60s
+    unit_of_measurement: ""
+    icon: "mdi:wifi"
+
+  # Skipped schedule counter
+  - platform: template
+    name: "Schedule Skipped Count"
+    id: skipped_schedule_sensor
+    lambda: |-
+      return id(schedule_skip_count);
+    update_interval: 60s
+    icon: "mdi:counter"
+
+number:
+  - platform: template
+    name: "Winter Start Hour"
+    id: winter_start_hour
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 12
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Winter End Hour"
+    id: winter_end_hour
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 17
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Summer Start Month"
+    id: summer_start_month
+    min_value: 1
+    max_value: 12
+    step: 1
+    initial_value: 7
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Summer Start Day"
+    id: summer_start_day
+    min_value: 1
+    max_value: 31
+    step: 1
+    initial_value: 1
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Winter Start Month"
+    id: winter_start_month
+    min_value: 1
+    max_value: 12
+    step: 1
+    initial_value: 12
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Winter Start Day"
+    id: winter_start_day
+    min_value: 1
+    max_value: 31
+    step: 1
+    initial_value: 1
+    restore_value: true
+    optimistic: true
+
+  - platform: template
+    name: "Summer Manual Override Duration (s)"
+    id: summer_override_duration
+    min_value: 60
+    max_value: 86400
+    step: 60
+    initial_value: 43200
+    restore_value: true
+    optimistic: true
+
+select:
+  - platform: template
+    name: "Winter Active Days"
+    id: winter_days_select
+    optimistic: true
+    options:
+      - "Mon,Wed,Fri"
+      - "Mon-Fri"
+      - "Mon,Wed,Fri,Sat"
+      - "Fri,Sat,Sun"
+      - "Everyday"
+    initial_option: "Mon,Wed,Fri"
+    restore_value: true
+
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          bool wifi_connected = esphome::network::is_connected();
+          esphome::ESPTime now;
+          if (id(last_valid_time_source) == "homeassistant") {
+            now = id(ha_time).now();
+          } else {
+            now = id(sntp_time).now();
+          }
+
+          // Mark time as ready after first valid reading
+          if (now.is_valid() && !id(time_ready)) {
+            id(time_ready) = true;
+            ESP_LOGI("time", "✅ First valid time acquired; time_ready set.");
+          }
+
+          ESP_LOGD("diagnostic",
+                   "WiFi=%s, TimeSource=%s, TimeValid=%s, time_ready=%s, schedule_enabled=%s, Timestamp=%u",
+                   wifi_connected ? "connected" : "disconnected",
+                   id(last_valid_time_source).c_str(),
+                   now.is_valid() ? "true" : "false",
+                   id(time_ready) ? "true" : "false",
+                   id(schedule_enabled) ? "true" : "false",
+                   now.timestamp);
+
+          // Do NOT run schedule until boot delay completed
+          if (!id(schedule_enabled)) {
+            id(schedule_skip_count)++;
+            id(skipped_schedule_sensor).publish_state(id(schedule_skip_count));
+            ESP_LOGW("safety",
+                     "⏳ Skipping schedule — boot delay not finished (Count=%u)",
+                     id(schedule_skip_count));
+            return;
+          }
+
+          // SAFETY CHECK — run schedule only when time is ready AND valid
+          if (!id(time_ready) || !now.is_valid()) {
+            id(schedule_skip_count)++;
+            id(skipped_schedule_sensor).publish_state(id(schedule_skip_count));
+            ESP_LOGW("safety",
+                     "⚠️ Skipping schedule update — time not ready or invalid (Count=%u)",
+                     id(schedule_skip_count));
+            return;
+          }
+
+          auto day_of_year = [](int m, int d) -> int {
+            static const int days_in_month[] = { 0,31,59,90,120,151,181,212,243,273,304,334 };
+            return days_in_month[m - 1] + d;
+          };
+
+          int today = day_of_year(now.month, now.day_of_month);
+          int summer_start = day_of_year(int(id(summer_start_month).state), int(id(summer_start_day).state));
+          int winter_start = day_of_year(int(id(winter_start_month).state), int(id(winter_start_day).state));
+
+          bool is_summer = false;
+          if (summer_start < winter_start) {
+            is_summer = today >= summer_start && today < winter_start;
+          } else {
+            is_summer = today >= summer_start || today < winter_start;
+          }
+
+          id(is_summer_state) = is_summer;
+          id(is_summer_sensor).publish_state(is_summer);
+
+          int dow = now.day_of_week;
+          int hour = now.hour;
+
+          bool manual_off = (id(manual_off_time) > 0);
+          bool scheduled_on = false;
+
+          if (is_summer) {
+            scheduled_on = true;
+          } else {
+            int start_hr = int(id(winter_start_hour).state);
+            int end_hr = int(id(winter_end_hour).state);
+            bool in_time = (hour >= start_hr && hour < end_hr);
+
+            std::string days = id(winter_days_select).state;
+            bool valid_day = false;
+            if (days == "Everyday") {
+              valid_day = true;
+            } else if (
+                (days.find("Mon") != std::string::npos && dow == 1) ||
+                (days.find("Tue") != std::string::npos && dow == 2) ||
+                (days.find("Wed") != std::string::npos && dow == 3) ||
+                (days.find("Thu") != std::string::npos && dow == 4) ||
+                (days.find("Fri") != std::string::npos && dow == 5) ||
+                (days.find("Sat") != std::string::npos && dow == 6) ||
+                (days.find("Sun") != std::string::npos && dow == 7)) {
+              valid_day = true;
+            }
+            scheduled_on = valid_day && in_time;
+          }
+
+          ESP_LOGD("schedule", "Now=%02d:%02d | Summer=%s | Scheduled=%s | ManualOff=%s | Relay=%s",
+                   now.hour, now.minute,
+                   is_summer ? "true" : "false",
+                   scheduled_on ? "true" : "false",
+                   manual_off ? "true" : "false",
+                   id(power_relay).state ? "ON" : "OFF");
+
+          if (manual_off) {
+            uint32_t now_ts = now.timestamp;
+            uint32_t off_ts = id(manual_off_time);
+
+            if (is_summer && now_ts - off_ts >= int(id(summer_override_duration).state)) {
+              id(manual_off_time) = 0;
+              id(manual_switch).turn_on();
+              ESP_LOGI("manual", "Summer override expired — turning back ON (Summer).");
+            } else if (!is_summer && scheduled_on) {
+              if (hour == int(id(winter_start_hour).state)) {
+                id(manual_off_time) = 0;
+                id(manual_switch).turn_on();
+                ESP_LOGI("manual", "Start of schedule reached — turning back ON (Winter).");
+              } else {
+                ESP_LOGI("manual", "Manual OFF respected — within scheduled time but not at start.");
+              }
+            }
+            return;
+          }
+
+          // Apply schedule if not overridden
+          if (scheduled_on && !id(power_relay).state) {
+            id(power_relay).turn_on();
+            ESP_LOGI("schedule", "✅ Scheduled ON — relay turned ON");
+          } else if (!scheduled_on && id(power_relay).state) {
+            id(power_relay).turn_off();
+            ESP_LOGI("schedule", "❌ Outside schedule — relay turned OFF");
+          }
